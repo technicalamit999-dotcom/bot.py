@@ -1,11 +1,10 @@
 import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, ContextTypes, CommandHandler, MessageHandler, filters
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 quizzes = {} 
-user_state = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -20,7 +19,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not quizzes:
-        await update.message.reply_text("📂 Filhal koi quiz available nahi hai. Kripya pehle koi `.txt` file `/import [Naam]` ke sath bhej kar quiz banayein!")
+        await update.message.reply_text("📂 Filhal koi quiz available nahi hai. Kripya pehle `.txt` file `/import [Naam]` ke sath bhej kar quiz banayein!")
         return
     
     text = "📋 **Available Quizzes:**\n\n"
@@ -171,13 +170,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     TOKEN = "9269979361:AAGk8w47dP8oGijvRVuRDNvnCLMXlWA-HuU"
     
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Updated Application builder for stability
+    application = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("list", list_quizzes))
-    app.add_handler(CommandHandler("play", play_quiz))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("list", list_quizzes))
+    application.add_handler(CommandHandler("play", play_quiz))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
     print("Bot started successfully...")
-    app.run_polling()
+    application.run_polling()
