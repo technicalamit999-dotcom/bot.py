@@ -23,6 +23,17 @@ user_defaults = {}  # User ki default settings store karne ke liye
 GET_TITLE, GET_NEGATIVE, GET_TIMER, GET_SHUFFLE, GET_EXPLAIN, GET_SPLIT, GET_FILE = range(7)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    # Deep-link handling (Jab user DM mein play button dabakar aayega)
+    if len(context.args) > 0 and context.args[0].startswith('play_'):
+        quiz_id = context.args[0].replace('play_', '')
+        if quiz_id in quizzes:
+            await update.message.reply_text(f"🚀 DM mein Quiz shuru ho rahi hai! (Quiz ID: {quiz_id})")
+            # Simulate /play command for DM
+            context.args = [quiz_id]
+            await play_quiz(update, context)
+            return
+
     await update.message.reply_text(
         "👋 **Welcome to Elite Quiz Bot!**\n\n"
         "✨ **Main Commands:**\n"
@@ -162,24 +173,21 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             q_text = lines[0].split('. ', 1)[1] if '. ' in lines[0] else lines[0]
             
             options = []
-            correct_idx = 0
-            explanation = ""
+            correct_ans = ""
             
             for line in lines[1:]:
                 if any(line.startswith(prefix) for prefix in ['(a)', '(b)', '(c)', '(d)', 'a)', 'b)', 'c)', 'd)']):
                     if '✅' in line:
-                        correct_idx = len(options)
-                    clean_opt = line.replace('✅', '').strip()
-                    options.append(clean_opt)
-                elif line.startswith('Ex:') or line.startswith('Explanation:'):
-                    explanation = line.replace('Ex:', '').replace('Explanation:', '').strip()
+                        correct_ans = line.replace('(', '').replace(')', '')[0].lower()
+                    options.append(line.replace('✅', '').strip())
+                elif line.startswith('Ex:'):
+                    break
                     
-            if q_text and len(options) >= 2:
+            if q_text and options and correct_ans:
                 questions.append({
                     "question": q_text,
                     "options": options,
-                    "correct": correct_idx,
-                    "explanation": explanation
+                    "answer": correct_ans
                 })
         except:
             continue
@@ -203,7 +211,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Action Buttons (Private, Group, Chrome Mock Test)
     keyboard = [
         [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
-        [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! ID: {q_id}")],
+        [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! Play using /play {q_id}")],
         [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -222,6 +230,59 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Action cancelled.")
     return ConversationHandler.END
+
+# --- PLAY QUIZ FLOW ---
+async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("⚠️ Kripya Quiz ID dein. Jaise: `/play 1`")
+        return
+    
+    quiz_id = args[0]
+    if quiz_id not in quizzes:
+        await update.message.reply_text("❌ Ye Quiz ID galat hai. `/list` check karein.")
+        return
+    
+    quiz = quizzes[quiz_id]
+    user_id = update.effective_user.id
+    
+    context.user_data[f"playing_{user_id}"] = {
+        "quiz_id": quiz_id,
+        "q_index": 0,
+        "score": 0.0
+    }
+    
+    await update.message.reply_text(f"🚀 Quiz Start: **{quiz['title']}**\n\nPehla Question:")
+    await send_question(update, context)
+
+async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    play_data = context.user_data.get(f"playing_{user_id}")
+    if not play_data:
+        return
+    
+    quiz = quizzes[play_data["quiz_id"]]
+    q_index = play_data["q_index"]
+    
+    if q_index >= len(quiz["questions"]):
+        score = play_data["score"]
+        total = len(quiz["questions"])
+        await update.message.reply_text(
+            f"🎉 **Quiz Complete!**\n\n"
+            f"Aapka Score: **{score} / {total}**"
+        )
+        del context.user_data[f"playing_{user_id}"]
+        return
+    
+    q_data = quiz["questions"][q_index]
+    options_text = "\n".join([f"{opt}" for opt in q_data["options"]])
+    
+    await update.message.reply_text(
+        f"❓ **Question {q_index + 1} of {len(quiz['questions'])}:**\n"
+        f"{q_data['question']}\n\n"
+        f"{options_text}\n\n"
+        f"*(Sahi option ka letter reply karein, jaise: a, b, c, ya d)*"
+    )
 
 async def handle_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -253,6 +314,27 @@ async def handle_message_router(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("✅ **Aapki Default Settings Successfully Save ho gayi hain!** Ab `/create` karne par yeh automatically use hongi.")
         return
 
+    # Playing flow handler
+    play_key = f"playing_{user_id}"
+    if play_key in context.user_data:
+        play_data = context.user_data[play_key]
+        quiz = quizzes[play_data["quiz_id"]]
+        q_data = quiz["questions"][play_data["q_index"]]
+        negative_val = quiz.get("negative", 0.0)
+        
+        user_ans = text.replace("(", "").replace(")", "").strip().lower()
+        
+        if user_ans == q_data["answer"] or user_ans in q_data["answer"]:
+            play_data["score"] += 1.0
+            await update.message.reply_text("✅ Sahi jawab!")
+        else:
+            play_data["score"] -= negative_val
+            await update.message.reply_text(f"❌ Galat jawab! (-{negative_val} negative). Sahi option tha: *({q_data['answer'].upper()})*")
+            
+        play_data["q_index"] += 1
+        await send_question(update, context)
+        return
+
 if __name__ == '__main__':
     TOKEN = '9269979361:AAGk8w47dP8oGijvRVuRDNvnCLMXlWA-HuU'
     
@@ -276,7 +358,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setdefault", set_default_start))
     application.add_handler(CommandHandler("list", list_quizzes))
+    application.add_handler(CommandHandler("play", play_quiz))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message_router))
 
-    print("Elite Quiz Bot started successfully...")
+    print("Elite Quiz Bot with Fixed DM Play started...")
     application.run_polling()
