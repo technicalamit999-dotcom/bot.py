@@ -1,5 +1,7 @@
 import io
+import csv
 import logging
+from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ConversationHandler,
+    CallbackQueryHandler,
 )
 
 logging.basicConfig(
@@ -17,19 +20,16 @@ logging.basicConfig(
 )
 
 quizzes = {}
-user_defaults = {}  # User ki default settings store karne ke liye
+user_defaults = {}
 
 # States for Quiz Creation
-GET_TITLE, GET_NEGATIVE, GET_TIMER, GET_SHUFFLE, GET_EXPLAIN, GET_SPLIT, GET_FILE = range(7)
+GET_TITLE, GET_NEGATIVE, GET_SPEED, GET_SPLIT, GET_FILE = range(5)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    # Deep-link handling (Jab user DM mein play button dabakar aayega)
     if len(context.args) > 0 and context.args[0].startswith('play_'):
         quiz_id = context.args[0].replace('play_', '')
         if quiz_id in quizzes:
             await update.message.reply_text(f"🚀 DM mein Quiz shuru ho rahi hai! (Quiz ID: {quiz_id})")
-            # Simulate /play command for DM
             context.args = [quiz_id]
             await play_quiz(update, context)
             return
@@ -37,9 +37,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 **Welcome to Elite Quiz Bot!**\n\n"
         "✨ **Main Commands:**\n"
-        "/create - Naya quiz banayein\n"
-        "/setdefault - Apni default settings set karein (Timer, Negative, etc.)\n"
+        "/create - Naya interactive button-based quiz banayein (.txt, .pdf, .csv, .html)\n"
+        "/setdefault - Apni default settings set karein\n"
         "/list - Saare available quizzes dekhein\n"
+        "/cancel - Chal rahi quiz ko rokne ke liye\n"
         "/play [ID] - Quiz khele"
     )
 
@@ -62,10 +63,10 @@ async def list_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 **Quiz ID:** `{q_id}`\n"
             f"📌 **Title:** {q_data['title']}\n"
             f"❓ **Questions:** {len(q_data['questions'])}\n"
-            f"⚡ **Negative:** {q_data['negative']} | ⏱️ **Timer:** {q_data['timer']}s\n"
+            f"⚡ **Negative:** {q_data['negative']} | ⏱️ **Speed:** {q_data['speed_label']}\n"
             f"------------------\n"
         )
-    text += "\nKhelne ke liye `/play [Quiz_ID]` ya niche diye buttons use karein."
+    text += "\nKhelne ke liye `/play [Quiz_ID]` use karein."
     await update.message.reply_text(text)
 
 # --- QUIZ CREATION FLOW ---
@@ -81,13 +82,12 @@ async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         defaults = user_defaults[user_id]
         context.user_data['quiz_negative'] = defaults['negative']
         context.user_data['quiz_timer'] = defaults['timer']
-        context.user_data['quiz_shuffle'] = defaults['shuffle']
-        context.user_data['quiz_explain'] = defaults['explain']
+        context.user_data['quiz_speed_label'] = defaults['speed_label']
         
         await update.message.reply_text(
             f"⚡ Aapki Saved Default Settings apply ho gayi hain:\n"
             f"• Negative: {defaults['negative']}\n"
-            f"• Timer: {defaults['timer']}s\n\n"
+            f"• Speed: {defaults['speed_label']}\n\n"
             f"🗂️ Kya 50 se zyada questions ko parts mein divide karna hai? (yes/no)"
         )
         return GET_SPLIT
@@ -101,43 +101,47 @@ async def get_negative(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         context.user_data['quiz_negative'] = 0.0
     
-    await update.message.reply_text("⏱️ **Timer per Question:** Seconds likhein (Jaise: `30`):")
-    return GET_TIMER
+    keyboard = [
+        [InlineKeyboardButton("⚡ Fast (15s per Q)", callback_data="speed_fast")],
+        [InlineKeyboardButton("🏃 Normal (30s per Q)", callback_data="speed_normal")],
+        [InlineKeyboardButton("🚶 Slow (60s per Q)", callback_data="speed_slow")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("⏱️ **Quiz Speed / Timer select karein:**", reply_markup=reply_markup)
+    return GET_SPEED
 
-async def get_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['quiz_timer'] = int(update.message.text.strip())
-    except:
+async def get_speed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "speed_fast":
+        context.user_data['quiz_timer'] = 15
+        context.user_data['quiz_speed_label'] = "Fast (15s)"
+    elif data == "speed_slow":
+        context.user_data['quiz_timer'] = 60
+        context.user_data['quiz_speed_label'] = "Slow (60s)"
+    else:
         context.user_data['quiz_timer'] = 30
+        context.user_data['quiz_speed_label'] = "Normal (30s)"
         
-    await update.message.reply_text("🔀 **Shuffle Questions?** (yes/no):")
-    return GET_SHUFFLE
-
-async def get_shuffle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ans = update.message.text.strip().lower()
-    context.user_data['quiz_shuffle'] = True if 'yes' in ans or 'haan' in ans else False
-    
-    await update.message.reply_text("💡 **Show Explanations?** (yes/no):")
-    return GET_EXPLAIN
-
-async def get_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ans = update.message.text.strip().lower()
-    context.user_data['quiz_explain'] = True if 'yes' in ans or 'haan' in ans else False
-    
-    await update.message.reply_text("🗂️ Agar **50 se zyada questions** hon toh parts mein divide karein? (yes/no)")
+    await query.edit_message_text(
+        f"✅ Speed Selected: {context.user_data['quiz_speed_label']}\n\n"
+        f"🗂️ Agar file mein **50 se zyada questions** hon toh parts mein divide karein? (`yes` ya `no` likhkar bhejein)"
+    )
     return GET_SPLIT
 
 async def get_split(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ans = update.message.text.strip().lower()
     context.user_data['quiz_split'] = True if 'yes' in ans or 'haan' in ans else False
     
-    await update.message.reply_text("📂 Ab apni **.txt** ya **.pdf** file chat mein upload karein!")
+    await update.message.reply_text("📂 Ab apni **.txt, .pdf, .csv, ya .html** file chat mein upload karein!")
     return GET_FILE
 
 async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     if not document:
-        await update.message.reply_text("⚠️ Kripya valid .txt ya .pdf file upload karein.")
+        await update.message.reply_text("⚠️ Kripya valid file upload karein.")
         return GET_FILE
 
     file = await context.bot.get_file(document.file_id)
@@ -145,7 +149,9 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_content = ""
     file_name = document.file_name.lower() if document.file_name else ""
+    questions = []
 
+    # 1. PDF Parsing
     if file_name.endswith('.pdf'):
         try:
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -156,82 +162,150 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("❌ PDF read nahi ho saki.")
             return ConversationHandler.END
+
+    # 2. HTML Parsing
+    elif file_name.endswith('.html') or file_name.endswith('.htm'):
+        try:
+            html_text = file_bytes.decode('utf-8', errors='ignore')
+            soup = BeautifulSoup(html_text, 'html.parser')
+            file_content = soup.get_text(separator='\n')
+        except:
+            await update.message.reply_text("❌ HTML read nahi ho saki.")
+            return ConversationHandler.END
+
+    # 3. CSV Parsing
+    elif file_name.endswith('.csv'):
+        try:
+            decoded_file = file_bytes.decode('utf-8', errors='ignore').splitlines()
+            reader = csv.reader(decoded_file)
+            for row in reader:
+                if len(row) >= 6: # Question, A, B, C, D, Correct, Explanation(opt)
+                    q_text = row[0].strip()
+                    opts = [row[1].strip(), row[2].strip(), row[3].strip(), row[4].strip()]
+                    ans = row[5].strip().lower()
+                    expl = row[6].strip() if len(row) > 6 else ""
+                    questions.append({
+                        "question": q_text,
+                        "options": opts,
+                        "answer": ans,
+                        "explanation": expl
+                    })
+        except:
+            pass
+
+    # 4. TXT / Default Parsing
     else:
         try:
             file_content = file_bytes.decode('utf-8')
         except:
             file_content = file_bytes.decode('latin-1', errors='ignore')
 
-    questions = []
-    blocks = file_content.split('Q')
-    
-    for block in blocks:
-        if not block.strip():
-            continue
-        try:
-            lines = [line.strip() for line in block.split('\n') if line.strip()]
-            q_text = lines[0].split('. ', 1)[1] if '. ' in lines[0] else lines[0]
-            
-            options = []
-            correct_ans = ""
-            
-            for line in lines[1:]:
-                if any(line.startswith(prefix) for prefix in ['(a)', '(b)', '(c)', '(d)', 'a)', 'b)', 'c)', 'd)']):
-                    if '✅' in line:
-                        correct_ans = line.replace('(', '').replace(')', '')[0].lower()
-                    options.append(line.replace('✅', '').strip())
-                elif line.startswith('Ex:'):
-                    break
-                    
-            if q_text and options and correct_ans:
-                questions.append({
-                    "question": q_text,
-                    "options": options,
-                    "answer": correct_ans
-                })
-        except:
-            continue
+    # Parse text blocks if not CSV
+    if not questions and file_content:
+        blocks = file_content.split('Q')
+        for block in blocks:
+            if not block.strip():
+                continue
+            try:
+                lines = [line.strip() for line in block.split('\n') if line.strip()]
+                q_text = lines[0].split('. ', 1)[1] if '. ' in lines[0] else lines[0]
+                
+                options = []
+                correct_ans = ""
+                explanation = ""
+                
+                for line in lines[1:]:
+                    if any(line.startswith(prefix) for prefix in ['(a)', '(b)', '(c)', '(d)', 'a)', 'b)', 'c)', 'd)']):
+                        if '✅' in line:
+                            correct_ans = line.replace('(', '').replace(')', '')[0].lower()
+                        options.append(line.replace('✅', '').strip())
+                    elif line.startswith('Ex:') or line.startswith('Explanation:'):
+                        explanation = line.replace('Ex:', '').replace('Explanation:', '').strip()
+                        
+                if q_text and options and correct_ans:
+                    questions.append({
+                        "question": q_text,
+                        "options": options,
+                        "answer": correct_ans,
+                        "explanation": explanation
+                    })
+            except:
+                continue
 
     if not questions:
-        await update.message.reply_text("❌ Questions extract nahi ho paye.")
+        await update.message.reply_text("❌ File se questions extract nahi ho paye. Format check karein.")
         return ConversationHandler.END
 
     title = context.user_data.get('quiz_title', 'Custom Quiz')
     negative = context.user_data.get('quiz_negative', 0.0)
     timer = context.user_data.get('quiz_timer', 30)
+    speed_label = context.user_data.get('quiz_speed_label', 'Normal (30s)')
+    should_split = context.user_data.get('quiz_split', False)
 
-    q_id = str(len(quizzes) + 1)
-    quizzes[q_id] = {
-        "title": title,
-        "negative": negative,
-        "timer": timer,
-        "questions": questions
-    }
+    # Splitting logic if > 50 and user agreed
+    if should_split and len(questions) > 50:
+        chunks = [questions[i:i + 50] for i in range(0, len(questions), 50)]
+        for idx, chunk in enumerate(chunks):
+            q_id = str(len(quizzes) + 1)
+            part_title = f"{title} (Part {idx + 1})"
+            quizzes[q_id] = {
+                "title": part_title,
+                "negative": negative,
+                "timer": timer,
+                "speed_label": speed_label,
+                "questions": chunk
+            }
+            
+            keyboard = [
+                [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
+                [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {part_title}! Play using /play {q_id}")],
+                [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Join this amazing quiz: {part_title} (ID: {q_id})")],
+                [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
+            ]
+            await update.message.reply_text(
+                f"✅ Created **{part_title}**!\n🆔 Quiz ID: `{q_id}`\n🔢 Questions: {len(chunk)}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    else:
+        q_id = str(len(quizzes) + 1)
+        quizzes[q_id] = {
+            "title": title,
+            "negative": negative,
+            "timer": timer,
+            "speed_label": speed_label,
+            "questions": questions
+        }
 
-    # Action Buttons (Private, Group, Chrome Mock Test)
-    keyboard = [
-        [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
-        [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! Play using /play {q_id}")],
-        [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        # Action Buttons with Share & Web Mock options
+        keyboard = [
+            [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
+            [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! Play using /play {q_id}")],
+            [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Join this amazing quiz: {title} (ID: {q_id})")],
+            [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        f"✅ **Quiz Successfully Created!**\n\n"
-        f"📌 Title: {title}\n"
-        f"🔢 Total Questions: {len(questions)}\n"
-        f"🆔 Quiz ID: `{q_id}`\n\n"
-        f"Apne mode select karein:",
-        reply_markup=reply_markup
-    )
+        await update.message.reply_text(
+            f"✅ **Quiz Successfully Created!**\n\n"
+            f"📌 Title: {title}\n"
+            f"🔢 Total Questions: {len(questions)}\n"
+            f"🆔 Quiz ID: `{q_id}`\n\n"
+            f"Apne mode select karein:",
+            reply_markup=reply_markup
+        )
         
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Action cancelled.")
+    user_id = update.effective_user.id
+    if f"playing_{user_id}" in context.user_data:
+        del context.user_data[f"playing_{user_id}"]
+        await update.message.reply_text("🛑 Quiz successfully rok di gayi hai!")
+    else:
+        await update.message.reply_text("❌ Koi active quiz nahi chal rahi hai.")
     return ConversationHandler.END
 
-# --- PLAY QUIZ FLOW ---
+# --- PLAY QUIZ WITH CLICKABLE INLINE BUTTONS & LIGHT ICON EXPLANATION ---
 async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -252,10 +326,11 @@ async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "score": 0.0
     }
     
-    await update.message.reply_text(f"🚀 Quiz Start: **{quiz['title']}**\n\nPehla Question:")
-    await send_question(update, context)
+    await update.message.reply_text(f"🚀 Quiz Start: **{quiz['title']}**\n(Quiz rokne ke liye `/cancel` dabayein)")
+    await send_question_with_buttons(update, context)
 
-async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def send_question_with_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     play_data = context.user_data.get(f"playing_{user_id}")
     if not play_data:
@@ -267,22 +342,77 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q_index >= len(quiz["questions"]):
         score = play_data["score"]
         total = len(quiz["questions"])
-        await update.message.reply_text(
-            f"🎉 **Quiz Complete!**\n\n"
-            f"Aapka Score: **{score} / {total}**"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎉 **Quiz Complete!**\n\nAapka Score: **{score} / {total}**"
         )
         del context.user_data[f"playing_{user_id}"]
         return
     
     q_data = quiz["questions"][q_index]
-    options_text = "\n".join([f"{opt}" for opt in q_data["options"]])
     
-    await update.message.reply_text(
-        f"❓ **Question {q_index + 1} of {len(quiz['questions'])}:**\n"
-        f"{q_data['question']}\n\n"
-        f"{options_text}\n\n"
-        f"*(Sahi option ka letter reply karein, jaise: a, b, c, ya d)*"
+    keyboard = []
+    letters = ['a', 'b', 'c', 'd', 'e', 'f']
+    for idx, opt in enumerate(q_data["options"]):
+        opt_letter = letters[idx] if idx < len(letters) else str(idx+1)
+        callback_data = f"ans_{play_data['quiz_id']}_{q_index}_{opt_letter}"
+        keyboard.append([InlineKeyboardButton(opt, callback_data=callback_data)])
+        
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"❓ **Question {q_index + 1} of {len(quiz['questions'])}:**\n{q_data['question']}",
+        reply_markup=reply_markup
     )
+
+async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("ans_"):
+        return
+        
+    _, quiz_id, q_idx_str, user_ans = data.split("_")
+    q_index = int(q_idx_str)
+    user_id = update.effective_user.id
+    
+    play_key = f"playing_{user_id}"
+    if play_key not in context.user_data:
+        await query.edit_message_text("⚠️ Yeh quiz session expire ho chuka hai.")
+        return
+        
+    play_data = context.user_data[play_key]
+    if play_data["quiz_id"] != quiz_id or play_data["q_index"] != q_index:
+        await query.edit_message_text("⚠️ Ye purana question hai.")
+        return
+        
+    quiz = quizzes[quiz_id]
+    q_data = quiz["questions"][q_index]
+    negative_val = quiz.get("negative", 0.0)
+    
+    correct_ans = q_data["answer"].strip().lower()
+    user_ans = user_ans.strip().lower()
+    
+    if user_ans == correct_ans:
+        play_data["score"] += 1.0
+        result_text = f"✅ **Sahi jawab!** ({user_ans.upper()})"
+    else:
+        play_data["score"] -= negative_val
+        result_text = f"❌ **Galat jawab!** (-{negative_val}). Sahi option tha: *({correct_ans.upper()})*"
+        
+    # Add Explanation with Light Bulb Icon (💡) if available
+    explanation_text = ""
+    if q_data.get("explanation"):
+        explanation_text = f"\n\n💡 **Explanation:** {q_data['explanation']}"
+        
+    await query.edit_message_text(
+        f"❓ **Question {q_index + 1}:** {q_data['question']}\n\n{result_text}{explanation_text}"
+    )
+    
+    play_data["q_index"] += 1
+    await send_question_with_buttons(update, context)
 
 async def handle_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -294,46 +424,35 @@ async def handle_message_router(update: Update, context: ContextTypes.DEFAULT_TY
         except:
             val = 0.0
         context.user_data['def_neg'] = val
-        context.user_data['setting_step'] = 'timer'
-        await update.message.reply_text("⏱️ Ab apne **Default Timer (seconds)** bhejiye (Jaise: `30`):")
+        
+        keyboard = [
+            [InlineKeyboardButton("⚡ Fast (15s)", callback_data="def_speed_fast")],
+            [InlineKeyboardButton("🏃 Normal (30s)", callback_data="def_speed_normal")],
+            [InlineKeyboardButton("🚶 Slow (60s)", callback_data="def_speed_slow")]
+        ]
+        await update.message.reply_text("⏱️ Apni **Default Speed / Timer** select karein:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    elif context.user_data.get('setting_step') == 'timer':
-        try:
-            val = int(text)
-        except:
-            val = 30
+async def handle_default_speed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+    
+    if "fast" in data:
+        timer_val, label = 15, "Fast (15s)"
+    elif "slow" in data:
+        timer_val, label = 60, "Slow (60s)"
+    else:
+        timer_val, label = 30, "Normal (30s)"
         
-        user_defaults[user_id] = {
-            "negative": context.user_data.get('def_neg', 0.0),
-            "timer": val,
-            "shuffle": True,
-            "explain": True
-        }
-        context.user_data['setting_step'] = None
-        await update.message.reply_text("✅ **Aapki Default Settings Successfully Save ho gayi hain!** Ab `/create` karne par yeh automatically use hongi.")
-        return
-
-    # Playing flow handler
-    play_key = f"playing_{user_id}"
-    if play_key in context.user_data:
-        play_data = context.user_data[play_key]
-        quiz = quizzes[play_data["quiz_id"]]
-        q_data = quiz["questions"][play_data["q_index"]]
-        negative_val = quiz.get("negative", 0.0)
-        
-        user_ans = text.replace("(", "").replace(")", "").strip().lower()
-        
-        if user_ans == q_data["answer"] or user_ans in q_data["answer"]:
-            play_data["score"] += 1.0
-            await update.message.reply_text("✅ Sahi jawab!")
-        else:
-            play_data["score"] -= negative_val
-            await update.message.reply_text(f"❌ Galat jawab! (-{negative_val} negative). Sahi option tha: *({q_data['answer'].upper()})*")
-            
-        play_data["q_index"] += 1
-        await send_question(update, context)
-        return
+    user_defaults[user_id] = {
+        "negative": context.user_data.get('def_neg', 0.0),
+        "timer": timer_val,
+        "speed_label": label
+    }
+    context.user_data['setting_step'] = None
+    await query.edit_message_text(f"✅ **Default Settings Saved!**\n• Negative: {user_defaults[user_id]['negative']}\n• Speed: {label}")
 
 if __name__ == '__main__':
     TOKEN = '9269979361:AAGk8w47dP8oGijvRVuRDNvnCLMXlWA-HuU'
@@ -345,9 +464,7 @@ if __name__ == '__main__':
         states={
             GET_TITLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_title)],
             GET_NEGATIVE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_negative)],
-            GET_TIMER: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_timer)],
-            GET_SHUFFLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_shuffle)],
-            GET_EXPLAIN: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_explain)],
+            GET_SPEED: [CallbackQueryHandler(get_speed_callback, pattern="^speed_")],
             GET_SPLIT: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_split)],
             GET_FILE: [MessageHandler(filters.Document.ALL, receive_file)],
         },
@@ -358,8 +475,11 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setdefault", set_default_start))
     application.add_handler(CommandHandler("list", list_quizzes))
+    application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("play", play_quiz))
+    application.add_handler(CallbackQueryHandler(handle_button_click, pattern="^ans_"))
+    application.add_handler(CallbackQueryHandler(handle_default_speed_callback, pattern="^def_speed_"))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message_router))
 
-    print("Elite Quiz Bot with Fixed DM Play started...")
+    print("Elite Quiz Bot (Multi-format, Share & Explanations) started...")
     application.run_polling()
