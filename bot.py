@@ -9,7 +9,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ConversationHandler,
-    CallbackQueryHandler,
 )
 
 logging.basicConfig(
@@ -60,8 +59,6 @@ async def list_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- QUIZ CREATION FLOW ---
 async def create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    # Agar user ne default set kar rakha hai, toh seedha title poochho
     await update.message.reply_text("📝 **Naya Quiz Banayein**\n\nPehle **Quiz ka Naam (Title)** likhkar bhejein:")
     return GET_TITLE
 
@@ -69,7 +66,6 @@ async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['quiz_title'] = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # Agar default saved hai, toh direct use kar sakte hain ya poochh sakte hain
     if user_id in user_defaults:
         defaults = user_defaults[user_id]
         context.user_data['quiz_negative'] = defaults['negative']
@@ -195,7 +191,6 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = context.user_data.get('quiz_title', 'Custom Quiz')
     negative = context.user_data.get('quiz_negative', 0.0)
     timer = context.user_data.get('quiz_timer', 30)
-    should_split = context.user_data.get('quiz_split', False)
 
     q_id = str(len(quizzes) + 1)
     quizzes[q_id] = {
@@ -205,7 +200,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "questions": questions
     }
 
-    # Interactive Action Buttons (Private, Group, Chrome Mock Test)
+    # Action Buttons (Private, Group, Chrome Mock Test)
     keyboard = [
         [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
         [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! ID: {q_id}")],
@@ -228,9 +223,60 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Action cancelled.")
     return ConversationHandler.END
 
-# --- SET DEFAULT HANDLER (Step-by-step state handling via normal messages) ---
 async def handle_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    if context.user_data.get('setting_step') == 'negative
+    if context.user_data.get('setting_step') == 'negative':
+        try:
+            val = float(text)
+        except:
+            val = 0.0
+        context.user_data['def_neg'] = val
+        context.user_data['setting_step'] = 'timer'
+        await update.message.reply_text("⏱️ Ab apne **Default Timer (seconds)** bhejiye (Jaise: `30`):")
+        return
+
+    elif context.user_data.get('setting_step') == 'timer':
+        try:
+            val = int(text)
+        except:
+            val = 30
+        
+        user_defaults[user_id] = {
+            "negative": context.user_data.get('def_neg', 0.0),
+            "timer": val,
+            "shuffle": True,
+            "explain": True
+        }
+        context.user_data['setting_step'] = None
+        await update.message.reply_text("✅ **Aapki Default Settings Successfully Save ho gayi hain!** Ab `/create` karne par yeh automatically use hongi.")
+        return
+
+if __name__ == '__main__':
+    TOKEN = '9269979361:AAGk8w47dP8oGijvRVuRDNvnCLMXlWA-HuU'
+    
+    application = Application.builder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('create', create_start)],
+        states={
+            GET_TITLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_title)],
+            GET_NEGATIVE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_negative)],
+            GET_TIMER: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_timer)],
+            GET_SHUFFLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_shuffle)],
+            GET_EXPLAIN: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_explain)],
+            GET_SPLIT: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_split)],
+            GET_FILE: [MessageHandler(filters.Document.ALL, receive_file)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("setdefault", set_default_start))
+    application.add_handler(CommandHandler("list", list_quizzes))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message_router))
+
+    print("Elite Quiz Bot started successfully...")
+    application.run_polling()
