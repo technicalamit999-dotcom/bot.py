@@ -1,6 +1,8 @@
 import io
 import csv
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,6 +21,20 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+# --- KEEP-ALIVE SERVER (Render Free Tier ke liye taaki bot disconnect na ho) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Elite Quiz Bot is Alive and Running!")
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+    server.serve_forever()
+
+# Background thread mein server chalayenge
+threading.Thread(target=run_health_server, daemon=True).start()
+
 quizzes = {}
 user_defaults = {}
 
@@ -26,7 +42,7 @@ user_defaults = {}
 GET_TITLE, GET_NEGATIVE, GET_SPEED, GET_SPLIT, GET_FILE = range(5)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) > 0 and context.args[0].startswith('play_'):
+    if context.args and context.args[0].startswith('play_'):
         quiz_id = context.args[0].replace('play_', '')
         if quiz_id in quizzes:
             await update.message.reply_text(f"🚀 DM mein Quiz shuru ho rahi hai! (Quiz ID: {quiz_id})")
@@ -40,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/create - Naya interactive button-based quiz banayein (.txt, .pdf, .csv, .html)\n"
         "/setdefault - Apni default settings set karein\n"
         "/list - Saare available quizzes dekhein\n"
-        "/cancel - Chal rahi quiz ko rokne ke liye\n"
+        "/stop - Chal rahi quiz ko rokne ke liye\n"
         "/play [ID] - Quiz khele"
     )
 
@@ -151,7 +167,6 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = document.file_name.lower() if document.file_name else ""
     questions = []
 
-    # 1. PDF Parsing
     if file_name.endswith('.pdf'):
         try:
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -163,7 +178,6 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ PDF read nahi ho saki.")
             return ConversationHandler.END
 
-    # 2. HTML Parsing
     elif file_name.endswith('.html') or file_name.endswith('.htm'):
         try:
             html_text = file_bytes.decode('utf-8', errors='ignore')
@@ -173,13 +187,12 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ HTML read nahi ho saki.")
             return ConversationHandler.END
 
-    # 3. CSV Parsing
     elif file_name.endswith('.csv'):
         try:
             decoded_file = file_bytes.decode('utf-8', errors='ignore').splitlines()
             reader = csv.reader(decoded_file)
             for row in reader:
-                if len(row) >= 6: # Question, A, B, C, D, Correct, Explanation(opt)
+                if len(row) >= 6:
                     q_text = row[0].strip()
                     opts = [row[1].strip(), row[2].strip(), row[3].strip(), row[4].strip()]
                     ans = row[5].strip().lower()
@@ -193,14 +206,12 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # 4. TXT / Default Parsing
     else:
         try:
             file_content = file_bytes.decode('utf-8')
         except:
             file_content = file_bytes.decode('latin-1', errors='ignore')
 
-    # Parse text blocks if not CSV
     if not questions and file_content:
         blocks = file_content.split('Q')
         for block in blocks:
@@ -241,8 +252,8 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timer = context.user_data.get('quiz_timer', 30)
     speed_label = context.user_data.get('quiz_speed_label', 'Normal (30s)')
     should_split = context.user_data.get('quiz_split', False)
+    bot_username = context.bot.username
 
-    # Splitting logic if > 50 and user agreed
     if should_split and len(questions) > 50:
         chunks = [questions[i:i + 50] for i in range(0, len(questions), 50)]
         for idx, chunk in enumerate(chunks):
@@ -257,9 +268,8 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             
             keyboard = [
-                [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
-                [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {part_title}! Play using /play {q_id}")],
-                [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Join this amazing quiz: {part_title} (ID: {q_id})")],
+                [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{bot_username}?start=play_{q_id}")],
+                [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Let's play this quiz: {part_title} (ID: {q_id}) &text=Play using /play {q_id}")],
                 [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
             ]
             await update.message.reply_text(
@@ -276,11 +286,9 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "questions": questions
         }
 
-        # Action Buttons with Share & Web Mock options
         keyboard = [
-            [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{context.bot.username}?start=play_{q_id}")],
-            [InlineKeyboardButton("👥 Play in Group", url=f"https://t.me/share/url?url=Let's play quiz {title}! Play using /play {q_id}")],
-            [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Join this amazing quiz: {title} (ID: {q_id})")],
+            [InlineKeyboardButton("👤 Play in Private (DM)", url=f"https://t.me/{bot_username}?start=play_{q_id}")],
+            [InlineKeyboardButton("📤 Share Quiz", url=f"https://t.me/share/url?url=Let's play this quiz: {title} (ID: {q_id}) &text=Play using /play {q_id}")],
             [InlineKeyboardButton("🌐 Open in Chrome (Mock Test)", url=f"https://example.com/mock-test/{q_id}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -296,7 +304,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if f"playing_{user_id}" in context.user_data:
         del context.user_data[f"playing_{user_id}"]
@@ -305,7 +313,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Koi active quiz nahi chal rahi hai.")
     return ConversationHandler.END
 
-# --- PLAY QUIZ WITH CLICKABLE INLINE BUTTONS & LIGHT ICON EXPLANATION ---
 async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -326,7 +333,7 @@ async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "score": 0.0
     }
     
-    await update.message.reply_text(f"🚀 Quiz Start: **{quiz['title']}**\n(Quiz rokne ke liye `/cancel` dabayein)")
+    await update.message.reply_text(f"🚀 Quiz Start: **{quiz['title']}**\n(Quiz rokne ke liye `/stop` dabayein)")
     await send_question_with_buttons(update, context)
 
 async def send_question_with_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -402,7 +409,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         play_data["score"] -= negative_val
         result_text = f"❌ **Galat jawab!** (-{negative_val}). Sahi option tha: *({correct_ans.upper()})*"
         
-    # Add Explanation with Light Bulb Icon (💡) if available
     explanation_text = ""
     if q_data.get("explanation"):
         explanation_text = f"\n\n💡 **Explanation:** {q_data['explanation']}"
@@ -451,35 +457,4 @@ async def handle_default_speed_callback(update: Update, context: ContextTypes.DE
         "timer": timer_val,
         "speed_label": label
     }
-    context.user_data['setting_step'] = None
-    await query.edit_message_text(f"✅ **Default Settings Saved!**\n• Negative: {user_defaults[user_id]['negative']}\n• Speed: {label}")
-
-if __name__ == '__main__':
-    TOKEN = '9269979361:AAGk8w47dP8oGijvRVuRDNvnCLMXlWA-HuU'
-    
-    application = Application.builder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('create', create_start)],
-        states={
-            GET_TITLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_title)],
-            GET_NEGATIVE: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_negative)],
-            GET_SPEED: [CallbackQueryHandler(get_speed_callback, pattern="^speed_")],
-            GET_SPLIT: [MessageHandler(filters.TEXT & (~filters.COMMAND), get_split)],
-            GET_FILE: [MessageHandler(filters.Document.ALL, receive_file)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setdefault", set_default_start))
-    application.add_handler(CommandHandler("list", list_quizzes))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("play", play_quiz))
-    application.add_handler(CallbackQueryHandler(handle_button_click, pattern="^ans_"))
-    application.add_handler(CallbackQueryHandler(handle_default_speed_callback, pattern="^def_speed_"))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message_router))
-
-    print("Elite Quiz Bot (Multi-format, Share & Explanations) started...")
-    application.run_polling()
+    context.user_data['
